@@ -23,36 +23,35 @@ class Map_Drawing_Assessment_Submissions {
             return new WP_Error('invalid_data', 'User ID and Question ID are required');
         }
 
-        $progress_data = array(
-            'user_id' => $data['user_id'],
-            'question_id' => $data['question_id'],
-            'drawing_data' => wp_json_encode($data['drawing']),
-            'is_flagged' => !empty($data['is_flagged']),
-            'updated_at' => current_time('mysql')
-        );
-
-        // Check if progress exists
         $existing = $wpdb->get_row($wpdb->prepare(
-            "SELECT id FROM {$this->progress_table} WHERE user_id = %d AND question_id = %d",
+            "SELECT * FROM {$this->progress_table} 
+            WHERE user_id = %d AND question_id = %d",
             $data['user_id'],
             $data['question_id']
         ));
 
+        $save_data = array(
+            'user_id' => $data['user_id'],
+            'question_id' => $data['question_id'],
+            'drawing' => wp_json_encode($data['drawing']),
+            'is_flagged' => !empty($data['is_flagged']),
+            'updated_at' => current_time('mysql')
+        );
+
+        $format = array('%d', '%d', '%s', '%d', '%s');
+
         if ($existing) {
             $result = $wpdb->update(
                 $this->progress_table,
-                $progress_data,
+                $save_data,
                 array('id' => $existing->id),
-                array('%d', '%d', '%s', '%d', '%s'),
+                $format,
                 array('%d')
             );
         } else {
-            $progress_data['created_at'] = current_time('mysql');
-            $result = $wpdb->insert(
-                $this->progress_table,
-                $progress_data,
-                array('%d', '%d', '%s', '%d', '%s', '%s')
-            );
+            $save_data['created_at'] = current_time('mysql');
+            $format[] = '%s';
+            $result = $wpdb->insert($this->progress_table, $save_data, $format);
         }
 
         if ($result === false) {
@@ -63,20 +62,20 @@ class Map_Drawing_Assessment_Submissions {
     }
 
     /**
-     * Submit complete assessment
+     * Submit assessment
      */
     public function submit_assessment($data) {
         global $wpdb;
 
-        if (empty($data['user_id']) || empty($data['questions'])) {
-            return new WP_Error('invalid_data', 'User ID and questions are required');
+        if (empty($data['user_id'])) {
+            return new WP_Error('invalid_data', 'User ID is required');
         }
 
         // Start transaction
         $wpdb->query('START TRANSACTION');
 
         try {
-            // Save submission record
+            // Save submission
             $submission_data = array(
                 'user_id' => $data['user_id'],
                 'time_taken' => $data['time_taken'],
@@ -97,32 +96,14 @@ class Map_Drawing_Assessment_Submissions {
 
             $submission_id = $wpdb->insert_id;
 
-            // Save answers for each question
-            foreach ($data['questions'] as $index => $question) {
-                $answer_data = array(
-                    'submission_id' => $submission_id,
-                    'question_id' => $question['id'],
-                    'answer_data' => wp_json_encode($data['answers'][$index]),
-                    'created_at' => current_time('mysql')
-                );
-
-                $result = $wpdb->insert(
-                    $wpdb->prefix . 'map_drawing_answers',
-                    $answer_data,
-                    array('%d', '%d', '%s', '%s')
-                );
-
-                if ($result === false) {
-                    throw new Exception('Failed to save answers');
-                }
-            }
-
-            // Clear progress data
-            $wpdb->delete(
-                $this->progress_table,
-                array('user_id' => $data['user_id']),
-                array('%d')
-            );
+            // Update progress records with submission ID
+            $wpdb->query($wpdb->prepare(
+                "UPDATE {$this->progress_table} 
+                SET submission_id = %d 
+                WHERE user_id = %d AND submission_id IS NULL",
+                $submission_id,
+                $data['user_id']
+            ));
 
             $wpdb->query('COMMIT');
             return $submission_id;
@@ -134,7 +115,45 @@ class Map_Drawing_Assessment_Submissions {
     }
 
     /**
-     * Save correction for a submission
+     * Get submission details
+     */
+    public function get_submission($id) {
+        global $wpdb;
+
+        $submission = $wpdb->get_row($wpdb->prepare(
+            "SELECT s.*, u.display_name as user_name 
+            FROM {$this->submissions_table} s 
+            LEFT JOIN {$wpdb->users} u ON s.user_id = u.ID 
+            WHERE s.id = %d",
+            $id
+        ));
+
+        if (!$submission) {
+            return null;
+        }
+
+        // Get progress records
+        $progress = $wpdb->get_results($wpdb->prepare(
+            "SELECT p.*, q.type, q.title, q.content 
+            FROM {$this->progress_table} p 
+            LEFT JOIN {$wpdb->prefix}map_drawing_questions q ON p.question_id = q.id 
+            WHERE p.submission_id = %d",
+            $id
+        ));
+
+        if ($progress) {
+            foreach ($progress as &$item) {
+                $item->drawing = json_decode($item->drawing, true);
+                $item->content = json_decode($item->content, true);
+            }
+            $submission->questions = $progress;
+        }
+
+        return $submission;
+    }
+
+    /**
+     * Save correction
      */
     public function save_correction($data) {
         global $wpdb;
@@ -143,104 +162,50 @@ class Map_Drawing_Assessment_Submissions {
             return new WP_Error('invalid_data', 'Submission ID is required');
         }
 
-        $correction_data = array(
-            'marks' => $data['marks'],
-            'comments' => $data['comments'],
-            'corrected_route' => wp_json_encode($data['corrected_route']),
-            'status' => 'corrected',
-            'updated_at' => current_time('mysql')
-        );
-
+        // Update submission status
         $result = $wpdb->update(
             $this->submissions_table,
-            $correction_data,
+            array(
+                'status' => 'corrected',
+                'updated_at' => current_time('mysql')
+            ),
             array('id' => $data['submission_id']),
-            array('%f', '%s', '%s', '%s', '%s'),
+            array('%s', '%s'),
             array('%d')
         );
 
         if ($result === false) {
-            return new WP_Error('db_error', 'Failed to save correction');
+            return new WP_Error('db_error', 'Failed to update submission');
+        }
+
+        // Update progress records with marks and comments
+        foreach ($data['marks'] as $question_id => $marks) {
+            $wpdb->update(
+                $this->progress_table,
+                array(
+                    'marks' => floatval($marks),
+                    'comments' => sanitize_textarea_field($data['comments'][$question_id]),
+                    'corrected_route' => isset($data['corrected_routes'][$question_id]) ? 
+                        wp_json_encode($data['corrected_routes'][$question_id]) : null
+                ),
+                array(
+                    'submission_id' => $data['submission_id'],
+                    'question_id' => $question_id
+                ),
+                array('%f', '%s', '%s'),
+                array('%d', '%d')
+            );
         }
 
         return true;
     }
 
     /**
-     * Get submission details
-     */
-    public function get_submission($id) {
-        global $wpdb;
-
-        $submission = $wpdb->get_row($wpdb->prepare(
-            "SELECT * FROM {$this->submissions_table} WHERE id = %d",
-            $id
-        ));
-
-        if (!$submission) {
-            return null;
-        }
-
-        // Get answers
-        $answers = $wpdb->get_results($wpdb->prepare(
-            "SELECT * FROM {$wpdb->prefix}map_drawing_answers WHERE submission_id = %d",
-            $id
-        ));
-
-        if ($answers) {
-            foreach ($answers as $answer) {
-                $answer->answer_data = json_decode($answer->answer_data, true);
-            }
-            $submission->answers = $answers;
-        }
-
-        return $submission;
-    }
-
-    /**
-     * Get user's submissions
-     */
-    public function get_user_submissions($user_id) {
-        global $wpdb;
-
-        return $wpdb->get_results($wpdb->prepare(
-            "SELECT * FROM {$this->submissions_table} WHERE user_id = %d ORDER BY created_at DESC",
-            $user_id
-        ));
-    }
-
-    /**
-     * Get all submissions with optional filters
-     */
-    public function get_submissions($filters = array()) {
-        global $wpdb;
-
-        $sql = "SELECT s.*, u.display_name as user_name 
-                FROM {$this->submissions_table} s 
-                LEFT JOIN {$wpdb->users} u ON s.user_id = u.ID 
-                WHERE 1=1";
-
-        if (!empty($filters['user_id'])) {
-            $sql .= $wpdb->prepare(" AND s.user_id = %d", $filters['user_id']);
-        }
-
-        if (!empty($filters['status'])) {
-            $sql .= $wpdb->prepare(" AND s.status = %s", $filters['status']);
-        }
-
-        $sql .= " ORDER BY s.created_at DESC";
-
-        return $wpdb->get_results($sql);
-    }
-
-    /**
-     * Create submissions related tables
+     * Create required tables
      */
     public static function create_tables() {
         global $wpdb;
         $charset_collate = $wpdb->get_charset_collate();
-
-        require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
 
         // Submissions table
         $submissions_table = $wpdb->prefix . 'map_drawing_submissions';
@@ -248,43 +213,34 @@ class Map_Drawing_Assessment_Submissions {
             id bigint(20) NOT NULL AUTO_INCREMENT,
             user_id bigint(20) NOT NULL,
             time_taken int(11) NOT NULL,
-            marks float DEFAULT NULL,
-            comments text DEFAULT NULL,
-            corrected_route longtext DEFAULT NULL,
-            status varchar(20) NOT NULL DEFAULT 'submitted',
+            status varchar(20) NOT NULL,
             created_at datetime NOT NULL,
             updated_at datetime NOT NULL,
             PRIMARY KEY  (id),
             KEY user_id (user_id)
         ) $charset_collate;";
-        dbDelta($sql);
 
         // Progress table
         $progress_table = $wpdb->prefix . 'map_drawing_progress';
-        $sql = "CREATE TABLE IF NOT EXISTS $progress_table (
+        $sql .= "CREATE TABLE IF NOT EXISTS $progress_table (
             id bigint(20) NOT NULL AUTO_INCREMENT,
+            submission_id bigint(20) DEFAULT NULL,
             user_id bigint(20) NOT NULL,
             question_id bigint(20) NOT NULL,
-            drawing_data longtext NOT NULL,
+            drawing longtext NOT NULL,
+            corrected_route longtext DEFAULT NULL,
+            marks float DEFAULT NULL,
+            comments text DEFAULT NULL,
             is_flagged tinyint(1) NOT NULL DEFAULT 0,
             created_at datetime NOT NULL,
             updated_at datetime NOT NULL,
             PRIMARY KEY  (id),
-            UNIQUE KEY user_question (user_id,question_id)
+            KEY submission_id (submission_id),
+            KEY user_id (user_id),
+            KEY question_id (question_id)
         ) $charset_collate;";
-        dbDelta($sql);
 
-        // Answers table
-        $answers_table = $wpdb->prefix . 'map_drawing_answers';
-        $sql = "CREATE TABLE IF NOT EXISTS $answers_table (
-            id bigint(20) NOT NULL AUTO_INCREMENT,
-            submission_id bigint(20) NOT NULL,
-            question_id bigint(20) NOT NULL,
-            answer_data longtext NOT NULL,
-            created_at datetime NOT NULL,
-            PRIMARY KEY  (id),
-            KEY submission_id (submission_id)
-        ) $charset_collate;";
+        require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
         dbDelta($sql);
     }
 }
