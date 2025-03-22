@@ -12,42 +12,66 @@ class Map_Drawing_Assessment_Questions {
     }
 
     /**
-     * Save a new question or update existing one
+     * Create questions table
      */
-    public function save_question($question_data) {
+    public static function create_table() {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'map_drawing_questions';
+        $charset_collate = $wpdb->get_charset_collate();
+
+        $sql = "CREATE TABLE IF NOT EXISTS $table_name (
+            id bigint(20) NOT NULL AUTO_INCREMENT,
+            type varchar(20) NOT NULL,
+            title varchar(255) NOT NULL,
+            content longtext NOT NULL,
+            created_at datetime NOT NULL,
+            updated_at datetime NOT NULL,
+            PRIMARY KEY  (id),
+            KEY type (type)
+        ) $charset_collate;";
+
+        require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+        dbDelta($sql);
+    }
+
+    /**
+     * Save a question
+     */
+    public function save_question($data) {
         global $wpdb;
 
-        if (empty($question_data['type'])) {
+        if (empty($data['type'])) {
             return new WP_Error('invalid_data', 'Question type is required');
         }
 
-        $data = array(
-            'type' => sanitize_text_field($question_data['type']),
-            'title' => sanitize_text_field($question_data['title']),
-            'content' => wp_json_encode($this->prepare_question_content($question_data)),
-            'created_at' => current_time('mysql'),
+        $save_data = array(
+            'type' => sanitize_text_field($data['type']),
+            'title' => sanitize_text_field($data['title']),
+            'content' => wp_json_encode($this->prepare_question_content($data)),
             'updated_at' => current_time('mysql')
         );
 
-        $format = array('%s', '%s', '%s', '%s', '%s');
+        $format = array('%s', '%s', '%s', '%s');
 
-        if (isset($question_data['id'])) {
+        if (!empty($data['id'])) {
             $result = $wpdb->update(
                 $this->table_name,
-                $data,
-                array('id' => $question_data['id']),
+                $save_data,
+                array('id' => $data['id']),
                 $format,
                 array('%d')
             );
         } else {
-            $result = $wpdb->insert($this->table_name, $data, $format);
+            $save_data['created_at'] = current_time('mysql');
+            $format[] = '%s';
+            $result = $wpdb->insert($this->table_name, $save_data, $format);
         }
 
         if ($result === false) {
             return new WP_Error('db_error', 'Failed to save question');
         }
 
-        return isset($question_data['id']) ? $question_data['id'] : $wpdb->insert_id;
+        return !empty($data['id']) ? $data['id'] : $wpdb->insert_id;
     }
 
     /**
@@ -61,12 +85,12 @@ class Map_Drawing_Assessment_Questions {
                 $content = array(
                     'instructions' => wp_kses_post($data['instructions']),
                     'start_marker' => array(
-                        'lat' => floatval($data['start_marker']['lat']),
-                        'lng' => floatval($data['start_marker']['lng'])
+                        'lat' => floatval($data['start_lat']),
+                        'lng' => floatval($data['start_lng'])
                     ),
                     'end_marker' => array(
-                        'lat' => floatval($data['end_marker']['lat']),
-                        'lng' => floatval($data['end_marker']['lng'])
+                        'lat' => floatval($data['end_lat']),
+                        'lng' => floatval($data['end_lng'])
                     )
                 );
                 break;
@@ -93,7 +117,7 @@ class Map_Drawing_Assessment_Questions {
     }
 
     /**
-     * Get all questions or filtered by type
+     * Get questions
      */
     public function get_questions($type = null) {
         global $wpdb;
@@ -119,7 +143,7 @@ class Map_Drawing_Assessment_Questions {
     }
 
     /**
-     * Get a single question by ID
+     * Get a single question
      */
     public function get_question($id) {
         global $wpdb;
@@ -137,7 +161,7 @@ class Map_Drawing_Assessment_Questions {
     }
 
     /**
-     * Delete questions by IDs
+     * Delete questions
      */
     public function delete_questions($ids) {
         global $wpdb;
@@ -202,27 +226,5 @@ class Map_Drawing_Assessment_Questions {
             
             return $question;
         }, $questions);
-    }
-
-    /**
-     * Create questions table
-     */
-    public static function create_table() {
-        global $wpdb;
-        $table_name = $wpdb->prefix . 'map_drawing_questions';
-        $charset_collate = $wpdb->get_charset_collate();
-
-        $sql = "CREATE TABLE IF NOT EXISTS $table_name (
-            id bigint(20) NOT NULL AUTO_INCREMENT,
-            type varchar(20) NOT NULL,
-            title varchar(255) NOT NULL,
-            content longtext NOT NULL,
-            created_at datetime NOT NULL,
-            updated_at datetime NOT NULL,
-            PRIMARY KEY  (id)
-        ) $charset_collate;";
-
-        require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
-        dbDelta($sql);
     }
 }
